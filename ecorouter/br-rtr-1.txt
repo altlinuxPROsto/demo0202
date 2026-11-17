@@ -1,0 +1,71 @@
+! ===== BR-RTR (EcoRouter) — Задание 1 =====
+! te0 -> ISP (ISP-BR), te1 -> FW-NET (BR-FW)
+! Проверить имена портов: show port brief
+enable
+configure terminal
+hostname br-rtr
+ip domain-name au-team.irpo
+!
+username net_admin
+ password P@ssw0rd
+ role admin
+exit
+!
+interface isp
+ ip address 172.16.2.2/28
+exit
+port te0
+ service-instance te0/isp
+  encapsulation untagged
+  connect ip interface isp
+ exit
+exit
+!
+interface fw
+ ip address 192.168.10.1/30
+exit
+port te1
+ service-instance te1/fw
+  encapsulation untagged
+  connect ip interface fw
+ exit
+exit
+!
+ip route 0.0.0.0/0 172.16.2.1
+!
+! ----- GRE-туннель -----
+interface tunnel.0
+ ip address 10.10.10.2/30
+ ip mtu 1400
+ ip tunnel 172.16.2.2 172.16.1.2 mode gre
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 P@ssw0rd
+exit
+!
+! ----- OSPF: туннель + сосед BR-FW -----
+router ospf 1
+ router-id 2.2.2.2
+ passive-interface default
+ no passive-interface tunnel.0
+ no passive-interface fw
+ network 10.10.10.0/30 area 0
+ network 192.168.10.0/30 area 0
+exit
+!
+! ----- NAT -----
+interface isp
+ ip nat outside
+exit
+interface fw
+ ip nat inside
+exit
+ip nat pool BR 192.168.10.1-192.168.10.2,192.168.20.1-192.168.20.14
+ip nat source dynamic inside-to-outside pool BR overload interface isp
+!
+! ----- Часовой пояс (Екатеринбург, UTC+5) -----
+ntp timezone utc+5
+!
+end
+write memory
+!
+! Проверка: show ip interface brief | show ip route | show ip ospf neighbor

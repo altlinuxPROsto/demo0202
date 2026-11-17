@@ -1,0 +1,11 @@
+! ===== HQ-RTR (EcoRouter) — Задание 2 =====
+enable
+configure terminal
+! 8080 снаружи -> веб-приложение HQ-SRV:80
+ip nat source static tcp 192.168.100.2 80 172.16.1.2 8080
+! 2027 снаружи -> SSH HQ-SRV:2027
+ip nat source static tcp 192.168.100.2 2027 172.16.1.2 2027
+end
+write memory
+!
+! Проверка: show ip nat static
