@@ -16,8 +16,8 @@ WORKGROUP="${WORKGROUP:-AU-TEAM}"
 TZONE="${TZONE:-Asia/Yekaterinburg}"        # Екатеринбург = UTC+5 (МСК+2)
 PASS="${PASS:-P@ssw0rd}"
 ADMIN_PASS="${ADMIN_PASS:-P@ssw0rd}"        # пароль administrator в Samba DC (для ввода HQ-CLI в домен)
-VLAN_MODE="${VLAN_MODE:-host}"              # host   — VLAN-тег вешает сама ВМ (vlan100/vlan200)
-                                            # access — тег уже стоит на сетевухе ВМ в Proxmox
+VLAN_MODE="${VLAN_MODE:-access}"            # access — VLAN-тег стоит на сетевухе ВМ в Proxmox (tag=100/200)
+                                            # host   — тег вешает сама ВМ (подинтерфейсы vlan100/vlan200)
 DNS_FWD1="${DNS_FWD1:-77.88.8.7}"
 DNS_FWD2="${DNS_FWD2:-77.88.8.3}"
 NTP_UPSTREAM="${NTP_UPSTREAM:-ru.pool.ntp.org}"
@@ -25,7 +25,7 @@ NTP_UPSTREAM="${NTP_UPSTREAM:-ru.pool.ntp.org}"
 # ---------------- План адресации ----------------
 ISP_HQ=172.16.1.1;  HQ_RTR_WAN=172.16.1.2      # 172.16.1.0/28
 ISP_BR=172.16.2.1;  BR_RTR_WAN=172.16.2.2      # 172.16.2.0/28
-HQ_SRV_GW=192.168.100.1; HQ_SRV_IP=192.168.100.2; HQ_SRV_NET=192.168.100.0/27   # VLAN100, 32 адреса
+HQ_SRV_GW=192.168.1.1;   HQ_SRV_IP=192.168.1.2;   HQ_SRV_NET=192.168.1.0/27     # VLAN100, 32 адреса (192.168.100.0 не использовать!)
 HQ_CLI_GW=192.168.200.1; HQ_CLI_IP=192.168.200.2; HQ_CLI_NET=192.168.200.0/28   # VLAN200, 16 адресов
 HQ_MGMT_GW=192.168.99.1;                          HQ_MGMT_NET=192.168.99.0/29   # VLAN999, 8 адресов
 BR_RTR_FW=192.168.10.1;  BR_FW_OUT=192.168.10.2;  FW_NET=192.168.10.0/30        # BR-RTR <-> BR-FW
@@ -79,6 +79,14 @@ etc_if() {
 }
 etc_dns() { local dev=$1; shift; mkdir -p "/etc/net/ifaces/$dev"; printf '%s\n' "$@" > "/etc/net/ifaces/$dev/resolv.conf"; printf '%s\n' "$@" > /etc/resolv.conf; }
 
+# убрать временные адреса/подинтерфейсы от bootstrap и прошлых запусков
+clean_if() {
+  local IF=$1 v
+  for v in 100 200 999; do ip link del "$IF.$v" 2>/dev/null; done
+  ip addr flush dev "$IF" 2>/dev/null
+}
+drop_etc_if() { local d; for d in "$@"; do [ -d "/etc/net/ifaces/$d" ] && { ip link del "$d" 2>/dev/null; rm -rf "/etc/net/ifaces/$d"; log "удалён старый интерфейс $d"; }; done; }
+
 forward_on() {
   local f=/etc/net/sysctl.conf
   [ -f $f ] || f=/etc/sysctl.conf
@@ -108,9 +116,17 @@ sudo_enable() {
   mkdir -p /etc/sudoers.d
 }
 
-mk_sshuser() {
-  id sshuser >/dev/null 2>&1 || useradd -m -u 2027 -s /bin/bash sshuser
+ensure_sshuser() {
+  if id sshuser >/dev/null 2>&1; then
+    [ "$(id -u sshuser)" = 2027 ] || { usermod -u 2027 sshuser && chown -R sshuser /home/sshuser 2>/dev/null; }
+  else
+    useradd -m -u 2027 -s /bin/bash sshuser
+  fi
   set_pass sshuser "$PASS"
+}
+
+mk_sshuser() {
+  ensure_sshuser
   usermod -aG wheel sshuser 2>/dev/null
   sudo_enable
   echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 440 /etc/sudoers.d/sshuser
@@ -173,6 +189,7 @@ isp_1() {
   log "WAN=$WAN  ->HQ=$HQ  ->BR=$BR   (если не так: WAN_IF=.. HQ_IF=.. BR_IF=.. bash demo.sh isp 1)"
 
   set_hostname isp
+  clean_if "$HQ"; clean_if "$BR"
   etc_if "$WAN" dhcp
   etc_if "$HQ" static "$ISP_HQ/28"
   etc_if "$BR" static "$ISP_BR/28"
@@ -195,6 +212,7 @@ br_fw_1() {
   [ -n "$IN" ] || die "нужно 2 интерфейса, найдено: $(phys_ifaces | xargs)"
   log "к BR-RTR: $OUT   к BR-SRV: $IN   (если не так: FW_OUT_IF=.. FW_IN_IF=.. bash demo.sh br-fw 1)"
   set_hostname "br-fw.$DOMAIN"
+  clean_if "$OUT"; clean_if "$IN"
   etc_if "$OUT" static "$BR_FW_OUT/30" "$BR_RTR_FW"
   etc_if "$IN"  static "$BR_FW_IN/28"
   etc_dns "$OUT" "nameserver 77.88.8.8"
@@ -230,12 +248,13 @@ EOF
 hq_srv_1() {
   local IF=${SRV_IF:-$(nth_if 1)} DEV
   set_hostname "hq-srv.$DOMAIN"
-  ip link del "$IF.100" 2>/dev/null
+  clean_if "$IF"
   if [ "$VLAN_MODE" = host ]; then
     etc_if "$IF" static
     etc_if vlan100 static "$HQ_SRV_IP/27" "$HQ_SRV_GW" "$IF" 100
     DEV=vlan100
   else
+    drop_etc_if vlan100
     etc_if "$IF" static "$HQ_SRV_IP/27" "$HQ_SRV_GW"
     DEV=$IF
   fi
@@ -281,6 +300,7 @@ EOF
 br_srv_1() {
   local IF=${SRV_IF:-$(nth_if 1)}
   set_hostname "br-srv.$DOMAIN"
+  clean_if "$IF"
   etc_if "$IF" static "$BR_SRV_IP/28" "$BR_FW_IN"
   etc_dns "$IF" "nameserver 77.88.8.8"
   net_restart
@@ -307,17 +327,20 @@ hq_cli_1() {
       nmcli con add type vlan con-name vlan200 ifname vlan200 dev "$IF" id 200 ipv4.method auto ipv6.method ignore >/dev/null
       nmcli con up vlan200
     else
-      nmcli con mod "$base" ipv4.method auto
-      nmcli con up "$base"
+      nmcli con delete vlan200 >/dev/null 2>&1
+      nmcli con mod "$base" ipv4.method auto ipv4.addresses "" ipv4.gateway "" ipv4.dns "" ipv6.method ignore
+      nmcli con down "$base" >/dev/null 2>&1; nmcli con up "$base"
     fi
   else
     if [ "$VLAN_MODE" = host ]; then etc_if "$IF" static; etc_if vlan200 dhcp "" "" "$IF" 200
-    else etc_if "$IF" dhcp; fi
+    else drop_etc_if vlan200; etc_if "$IF" dhcp; fi
+    ip addr flush dev "$IF" 2>/dev/null
     net_restart
   fi
   sleep 5
-  ip -br a; ip r
+  ip -br a; ip r; cat /etc/resolv.conf
   wait_inet
+  getent hosts ya.ru >/dev/null || warn "DNS не отвечает: HQ-SRV ещё не настроен (hq-srv 1). Временно: echo nameserver 77.88.8.8 > /etc/resolv.conf"
   set_tz
   report "ip -br a" "ip r" "cat /etc/resolv.conf" "timedatectl"
 }
@@ -351,7 +374,14 @@ hq_srv_2() { hq_srv_raid; hq_srv_nfs; hq_srv_ntp; hq_srv_web; hq_srv_dnsad
 
 hq_srv_raid() {
   pkg mdadm
-  if [ -b /dev/md0 ]; then warn "/dev/md0 уже есть — пропускаю создание"; else
+  if [ ! -b /dev/md0 ] && grep -q '^md' /proc/mdstat; then   # после перезагрузки массив мог собраться как md127
+    local old mem; old=$(awk '/^md/{print $1; exit}' /proc/mdstat)
+    warn "найден /dev/$old — пересобираю как /dev/md0"
+    mem=$(mdadm --detail "/dev/$old" | grep -oE '/dev/(sd|vd)[a-z]+$')
+    mdadm --stop "/dev/$old" && mdadm --assemble /dev/md0 $mem
+    sleep 1; partprobe /dev/md0 2>/dev/null; udevadm settle
+  fi
+  if [ -b /dev/md0 ]; then log "/dev/md0 уже есть — пропускаю создание"; else
     local disks=() d
     for d in $(lsblk -dnbo NAME,SIZE,TYPE | awk '$3=="disk" && $2>=500*1024*1024 && $2<=2*1024*1024*1024 {print $1}'); do
       [ "$(lsblk -no NAME "/dev/$d" | wc -l)" = 1 ] && ! grep -q "^/dev/$d" /proc/mounts && disks+=("/dev/$d")
@@ -362,21 +392,23 @@ hq_srv_raid() {
     mdadm --zero-superblock --force "${disks[@]}" 2>/dev/null
     yes | mdadm --create /dev/md0 --level=0 --raid-devices=2 "${disks[@]}" --run
   fi
-  grep -q '/dev/md0\|md/0' /etc/mdadm.conf 2>/dev/null || mdadm --detail --scan >> /etc/mdadm.conf
+  sed -i '/^ARRAY/d' /etc/mdadm.conf 2>/dev/null
+  mdadm --detail --scan | sed -E 's#^ARRAY [^ ]+#ARRAY /dev/md0#' >> /etc/mdadm.conf
   if [ ! -b /dev/md0p1 ]; then
     printf 'label: dos\n,,L\n' | sfdisk /dev/md0
     partprobe /dev/md0 2>/dev/null; udevadm settle; sleep 1
-    mkfs.ext4 -F /dev/md0p1
   fi
+  [ "$(blkid -s TYPE -o value /dev/md0p1)" = ext4 ] || mkfs.ext4 -F /dev/md0p1
   mkdir -p /raid
   local uuid; uuid=$(blkid -s UUID -o value /dev/md0p1)
   sed -i '\# /raid #d' /etc/fstab
   echo "UUID=$uuid /raid ext4 defaults 0 0" >> /etc/fstab
-  mount -a && df -h /raid
+  mountpoint -q /raid || mount /raid
+  df -h /raid
 }
 
 hq_srv_nfs() {
-  pkg nfs-server nfs-utils 2>/dev/null || pkg nfs-server
+  pkg_any nfs-server nfs-utils
   mkdir -p /raid/nfs; chmod 777 /raid/nfs
   sed -i '\#^/raid/nfs#d' /etc/exports 2>/dev/null
   echo "/raid/nfs $HQ_CLI_NET(rw,sync,no_subtree_check,no_root_squash)" >> /etc/exports
@@ -398,7 +430,12 @@ hq_srv_web() {
   sleep 2
   mysql -u root -e "CREATE DATABASE IF NOT EXISTS webdb; CREATE USER IF NOT EXISTS 'web'@'localhost' IDENTIFIED BY '$PASS'; ALTER USER 'web'@'localhost' IDENTIFIED BY '$PASS'; GRANT ALL PRIVILEGES ON webdb.* TO 'web'@'localhost'; FLUSH PRIVILEGES;"
   local dump; dump=$(find "$w" -iname 'dump.sql' | head -1)
-  [ -n "$dump" ] && mysql -u root webdb < "$dump" && log "dump.sql импортирован в webdb"
+  if [ -z "$dump" ]; then warn "dump.sql не найден в $w"
+  elif [ "$(mysql -u root -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='webdb'")" -gt 0 ]; then
+    log "в webdb уже есть таблицы — повторный импорт пропущен"
+  else
+    mysql -u root webdb < "$dump" && log "dump.sql импортирован в webdb"
+  fi
   local root=/var/www/html; mkdir -p $root
   cp "$w"/index.php "$w"/logo.png $root/ 2>/dev/null || cp "$(find "$w" -iname index.php | head -1)" "$(find "$w" -iname logo.png | head -1)" $root/
   rm -f $root/index.html
@@ -434,11 +471,13 @@ br_srv_ntp() { chrony_client "$ISP_BR"; }
 br_srv_samba() {
   command -v samba-tool >/dev/null || die "samba-tool не найден — DC на BR-SRV не установлен?"
   samba-tool domain passwordsettings set --min-pwd-length=8 --account-lockout-threshold=5
-  samba-tool group add hq 2>/dev/null
+  samba-tool group show hq >/dev/null 2>&1 || samba-tool group add hq
+  local i members; members=$(samba-tool group listmembers hq 2>/dev/null)
   for i in 1 2 3 4 5; do
-    samba-tool user create "hquser$i" "$PASS" 2>/dev/null || samba-tool user setpassword "hquser$i" --newpassword="$PASS" >/dev/null
+    if samba-tool user show "hquser$i" >/dev/null 2>&1; then log "hquser$i уже есть"
+    else samba-tool user create "hquser$i" "$PASS"; fi
+    grep -qx "hquser$i" <<<"$members" || samba-tool group addmembers hq "hquser$i"
   done
-  samba-tool group addmembers hq hquser1,hquser2,hquser3,hquser4,hquser5 2>/dev/null
   samba-tool group listmembers hq
   samba-tool domain passwordsettings show | grep -Ei 'length|lockout'
 }
@@ -508,13 +547,13 @@ hq_cli_ntp() { chrony_client "$ISP_HQ"; }
 
 hq_cli_ssh() {   # чтобы ansible с BR-SRV мог зайти на HQ-CLI
   pkg_any openssh-server
-  id sshuser >/dev/null 2>&1 || useradd -m -u 2027 -s /bin/bash sshuser
-  set_pass sshuser "$PASS"; sudo_enable
+  ensure_sshuser; sudo_enable
   echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 440 /etc/sudoers.d/sshuser
   systemctl enable --now sshd
 }
 
 hq_cli_domain() {
+  if system-auth status 2>/dev/null | grep -qi "^ad"; then log "HQ-CLI уже в домене: $(system-auth status | head -1)"; return; fi
   pkg task-auth-ad-sssd || pkg_any task-auth-ad-winbind
   host -t SRV "_ldap._tcp.${DOMAIN}" >/dev/null 2>&1 || warn "SRV-запись домена не резолвится — сначала выполни 'hq-srv dnsad' на HQ-SRV"
   system-auth write ad "$REALM" hq-cli "$WORKGROUP" administrator "$ADMIN_PASS" \
@@ -536,10 +575,12 @@ hq_cli_nfs() {
   sed -i '\# /mnt/nfs #d' /etc/fstab
   echo "$HQ_SRV_IP:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0" >> /etc/fstab
   systemctl daemon-reload 2>/dev/null
-  mount -a && df -h /mnt/nfs
+  mountpoint -q /mnt/nfs || mount /mnt/nfs
+  df -h /mnt/nfs
 }
 
 hq_cli_yandex() {
+  rpm -qa | grep -qi yandex-browser && { log "Яндекс Браузер уже установлен"; return; }
   pkg yandex-browser-stable || pkg yandex-browser || {
     local f=/tmp/yandex.rpm
     curl -fL -o $f "https://repo.yandex.ru/yandex-browser/rpm/stable/x86_64/$(curl -fsL https://repo.yandex.ru/yandex-browser/rpm/stable/x86_64/ | grep -oE 'yandex-browser-stable-[^"]+\.rpm' | sort -V | tail -1)" \
