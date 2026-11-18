@@ -1,36 +1,68 @@
-! ===== HQ-RTR: переезд VLAN 100 с 192.168.100.0/27 на 192.168.1.0/27 =====
-! Нужен, только если hq-rtr-1.txt уже вводили со старой сетью 192.168.100.x.
-! Если какая-то строка "no ..." ругается, что такого нет, — это нормально, идём дальше.
+! ===== HQ-RTR: переезд на сети преподавателя =====
+! Было (любой из прошлых вариантов): VLAN100 192.168.100.0/27 или 192.168.1.0/27,
+!                                    VLAN200 192.168.200.0/28, VLAN999 192.168.99.0/29
+! Стало: VLAN100 192.168.0.0/27, VLAN200 192.168.1.0/28, VLAN999 192.168.2.0/29
+! Если строка "no ..." ругается, что такого нет, — это нормально, идём дальше.
+! Если роутер ещё не настраивали — этот файл не нужен, вводите hq-rtr-1.txt.
 enable
 configure terminal
 !
+! ----- адреса (сначала vl100, иначе 192.168.1.x пересечётся с vl200) -----
 interface vl100
  no ip address 192.168.100.1/27
- ip address 192.168.1.1/27
+ no ip address 192.168.1.1/27
+ ip address 192.168.0.1/27
+exit
+interface vl200
+ no ip address 192.168.200.1/28
+ ip address 192.168.1.1/28
+exit
+interface vl999
+ no ip address 192.168.99.1/29
+ ip address 192.168.2.1/29
 exit
 !
+! ----- OSPF -----
 router ospf 1
  no network 192.168.100.0/27 area 0
- network 192.168.1.0/27 area 0
+ no network 192.168.1.0/27 area 0
+ no network 192.168.200.0/28 area 0
+ no network 192.168.99.0/29 area 0
+ network 192.168.0.0/27 area 0
+ network 192.168.1.0/28 area 0
+ network 192.168.2.0/29 area 0
 exit
 !
+! ----- NAT -----
 no ip nat source dynamic inside-to-outside pool HQ overload interface isp
 no ip nat pool HQ
-ip nat pool HQ 192.168.1.1-192.168.1.30,192.168.200.1-192.168.200.14,192.168.99.1-192.168.99.6
+ip nat pool HQ 192.168.0.1-192.168.0.30,192.168.1.1-192.168.1.14,192.168.2.1-192.168.2.6
 ip nat source dynamic inside-to-outside pool HQ overload interface isp
 !
+! ----- DHCP: пересоздаём целиком -----
+interface vl200
+ no dhcp-server 1
+exit
+no dhcp-server 1
+no ip pool CLI
+ip pool CLI 192.168.1.2-192.168.1.14
 dhcp-server 1
  pool CLI 1
-  no dns 192.168.100.2
-  dns 192.168.1.2
+  mask 255.255.255.240
+  gateway 192.168.1.1
+  dns 192.168.0.2
+  domain-name au-team.irpo
  exit
 exit
+interface vl200
+ dhcp-server 1
+exit
 !
-! если уже делали Задание 2 со старыми адресами:
+! ----- старые пробросы портов (если делали Задание 2 на этом стенде) -----
 no ip nat source static tcp 192.168.100.2 80 172.16.1.2 8080
 no ip nat source static tcp 192.168.100.2 2027 172.16.1.2 2027
-ip nat source static tcp 192.168.1.2 80 172.16.1.2 8080
-ip nat source static tcp 192.168.1.2 2027 172.16.1.2 2027
+no ip nat source static tcp 192.168.1.2 80 172.16.1.2 8080
+no ip nat source static tcp 192.168.1.2 2027 172.16.1.2 2027
 !
 end
 write memory

@@ -14,14 +14,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/altlinuxPROsto/demo0202/main
 | Устройство | IP-адрес | Шлюз по умолчанию |
 |---|---|---|
 | ISP | DHCP (WAN), 172.16.1.1/28 (к HQ), 172.16.2.1/28 (к BR) | от DHCP |
-| HQ-RTR | 172.16.1.2/28 (isp), 192.168.1.1/27 (vl100), 192.168.200.1/28 (vl200), 192.168.99.1/29 (vl999), 10.10.10.1/30 (tunnel.0) | 172.16.1.1 |
-| BR-RTR | 172.16.2.2/28 (isp), 192.168.10.1/30 (к BR-FW), 10.10.10.2/30 (tunnel.0) | 172.16.2.1 |
-| HQ-SRV | 192.168.1.2/27 (VLAN 100) | 192.168.1.1 |
-| HQ-CLI | 192.168.200.2/28 (VLAN 200, DHCP) | 192.168.200.1 |
-| BR-SRV | 192.168.20.2/28 | 192.168.20.1 |
-| BR-FW | 192.168.10.2/30 (к BR-RTR), 192.168.20.1/28 (к BR-SRV) | 192.168.10.1 |
+| HQ-RTR | 172.16.1.2/28 (isp), 192.168.0.1/27 (vl100), 192.168.1.1/28 (vl200), 192.168.2.1/29 (vl999), 10.10.10.1/30 (tunnel.0) | 172.16.1.1 |
+| BR-RTR | 172.16.2.2/28 (isp), 192.168.3.1/30 (к BR-FW), 10.10.10.2/30 (tunnel.0) | 172.16.2.1 |
+| HQ-SRV | 192.168.0.2/27 (VLAN 100) | 192.168.0.1 |
+| HQ-CLI | 192.168.1.2/28 (VLAN 200, DHCP) | 192.168.1.1 |
+| BR-SRV | 192.168.4.2/28 | 192.168.4.1 |
+| BR-FW | 192.168.3.2/30 (к BR-RTR), 192.168.4.1/28 (к BR-SRV) | 192.168.3.1 |
 
-> Сеть 192.168.100.0 не используем (по требованию преподавателя): VLAN 100 = 192.168.1.0/27.
+> Сети взяты как на стенде преподавателя. 192.168.100.0/24 не используем: это сеть колледжа,
+> из неё ISP получает адрес по DHCP. Туннель оставлен в 10.10.10.0/30, как требует задание.
 
 ## Повторный запуск
 
@@ -51,28 +52,35 @@ VLAN-подынтерфейсы, не создаёт пользователей 
 
 HQ-SRV:
 ```bash
-ip l del ens18.100 2>/dev/null; ip a flush dev ens18; ip l set ens18 up; ip a add 192.168.1.2/27 dev ens18; ip r replace default via 192.168.1.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
+ip l del ens18.100 2>/dev/null; ip a flush dev ens18; ip l set ens18 up; ip a add 192.168.0.2/27 dev ens18; ip r replace default via 192.168.0.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
 ```
 BR-FW:
 ```bash
-ip l set ens18 up; ip a add 192.168.10.2/30 dev ens18; ip r replace default via 192.168.10.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
+ip a flush dev ens18; ip l set ens18 up; ip a add 192.168.3.2/30 dev ens18; ip r replace default via 192.168.3.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
 ```
 BR-SRV (только после BR-FW):
 ```bash
-ip l set ens18 up; ip a add 192.168.20.2/28 dev ens18; ip r replace default via 192.168.20.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
+ip a flush dev ens18; ip l set ens18 up; ip a add 192.168.4.2/28 dev ens18; ip r replace default via 192.168.4.1; echo nameserver 77.88.8.8 > /etc/resolv.conf
 ```
 HQ-CLI (адрес приходит по DHCP от HQ-RTR, DNS временно ставим публичный, пока HQ-SRV не настроен):
 ```bash
-echo nameserver 77.88.8.8 > /etc/resolv.conf
+nmcli con down "$(nmcli -g GENERAL.CONNECTION dev show ens18)"; nmcli con up "$(nmcli -g GENERAL.CONNECTION dev show ens18)"; echo nameserver 77.88.8.8 > /etc/resolv.conf
 ```
+(первые две команды заново берут адрес по DHCP, если HQ-RTR уже раздаёт новую сеть)
 
 > Если в Proxmox теги НЕ стоят, запускайте с `VLAN_MODE=host`, тогда скрипт сам создаст
 > подинтерфейсы `vlan100`/`vlan200`: `VLAN_MODE=host bash <(curl ...) hq-srv 1`.
 
-### HQ-RTR уже настроен со старой сетью 192.168.100.x?
+### Роутеры уже настроены со старыми адресами?
 
-Введите [ecorouter/hq-rtr-fix.txt](ecorouter/hq-rtr-fix.txt): он переносит VLAN 100, OSPF, NAT, DHCP (DNS) и пробросы
-на 192.168.1.0/27. После этого запустите заново `hq-srv 1` и `hq-cli 1`.
+Если HQ-RTR и BR-RTR вводили по прошлой версии (192.168.100.x / 192.168.1.0/27 / 192.168.200.x / 192.168.10.x / 192.168.20.x),
+введите поверх:
+
+- HQ-RTR: [ecorouter/hq-rtr-fix.txt](ecorouter/hq-rtr-fix.txt): VLAN 100/200/999, OSPF, NAT, DHCP
+- BR-RTR: [ecorouter/br-rtr-fix.txt](ecorouter/br-rtr-fix.txt): сеть к BR-FW, OSPF, NAT
+
+Затем на машинах: bootstrap-строка (из списка выше) и та же команда `... 1` ещё раз:
+`br-fw 1`, `hq-srv 1`, `br-srv 1`, `hq-cli 1`. Скрипт сам уберёт старые адреса.
 
 ## Задание 2: порядок
 

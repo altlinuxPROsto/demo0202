@@ -1,6 +1,7 @@
 ! ===== BR-RTR (EcoRouter) — Задание 1 =====
 ! te0 -> ISP (ISP-BR), te1 -> FW-NET (BR-FW)
 ! Проверить имена портов: show port brief
+! Сети как на стенде преподавателя: FW-NET 192.168.3.0/30, BR-NET 192.168.4.0/28
 enable
 configure terminal
 hostname br-rtr
@@ -22,7 +23,7 @@ port te0
 exit
 !
 interface fw
- ip address 192.168.10.1/30
+ ip address 192.168.3.1/30
 exit
 port te1
  service-instance te1/fw
@@ -49,7 +50,7 @@ router ospf 1
  no passive-interface tunnel.0
  no passive-interface fw
  network 10.10.10.0/30 area 0
- network 192.168.10.0/30 area 0
+ network 192.168.3.0/30 area 0
 exit
 !
 ! ----- NAT -----
@@ -59,7 +60,7 @@ exit
 interface fw
  ip nat inside
 exit
-ip nat pool BR 192.168.10.1-192.168.10.2,192.168.20.1-192.168.20.14
+ip nat pool BR 192.168.3.1-192.168.3.2,192.168.4.1-192.168.4.14
 ip nat source dynamic inside-to-outside pool BR overload interface isp
 !
 ! ----- Часовой пояс (Екатеринбург, UTC+5) -----

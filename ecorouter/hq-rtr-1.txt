@@ -1,6 +1,7 @@
 ! ===== HQ-RTR (EcoRouter) — Задание 1 =====
 ! te0 -> ISP (ISP-HQ), te1 -> HQ-NET (trunk VLAN 100/200/999)
 ! Проверить имена портов: show port brief
+! Сети как на стенде преподавателя: VLAN100 192.168.0.0/27, VLAN200 192.168.1.0/28, VLAN999 192.168.2.0/29
 enable
 configure terminal
 hostname hq-rtr
@@ -22,13 +23,13 @@ port te0
 exit
 !
 interface vl100
- ip address 192.168.1.1/27
+ ip address 192.168.0.1/27
 exit
 interface vl200
- ip address 192.168.200.1/28
+ ip address 192.168.1.1/28
 exit
 interface vl999
- ip address 192.168.99.1/29
+ ip address 192.168.2.1/29
 exit
 port te1
  service-instance te1/vl100
@@ -65,9 +66,9 @@ router ospf 1
  passive-interface default
  no passive-interface tunnel.0
  network 10.10.10.0/30 area 0
- network 192.168.1.0/27 area 0
- network 192.168.200.0/28 area 0
- network 192.168.99.0/29 area 0
+ network 192.168.0.0/27 area 0
+ network 192.168.1.0/28 area 0
+ network 192.168.2.0/29 area 0
 exit
 !
 ! ----- NAT -----
@@ -83,16 +84,16 @@ exit
 interface vl999
  ip nat inside
 exit
-ip nat pool HQ 192.168.1.1-192.168.1.30,192.168.200.1-192.168.200.14,192.168.99.1-192.168.99.6
+ip nat pool HQ 192.168.0.1-192.168.0.30,192.168.1.1-192.168.1.14,192.168.2.1-192.168.2.6
 ip nat source dynamic inside-to-outside pool HQ overload interface isp
 !
 ! ----- DHCP для HQ-CLI -----
-ip pool CLI 192.168.200.2-192.168.200.14
+ip pool CLI 192.168.1.2-192.168.1.14
 dhcp-server 1
  pool CLI 1
   mask 255.255.255.240
-  gateway 192.168.200.1
-  dns 192.168.1.2
+  gateway 192.168.1.1
+  dns 192.168.0.2
   domain-name au-team.irpo
  exit
 exit

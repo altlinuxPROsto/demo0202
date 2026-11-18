@@ -1,0 +1,31 @@
+! ===== BR-RTR: переезд на сети преподавателя =====
+! Было: FW-NET 192.168.10.0/30, BR-NET 192.168.20.0/28
+! Стало: FW-NET 192.168.3.0/30, BR-NET 192.168.4.0/28
+! Если строка "no ..." ругается, что такого нет, — это нормально, идём дальше.
+! Если роутер ещё не настраивали — этот файл не нужен, вводите br-rtr-1.txt.
+enable
+configure terminal
+!
+interface fw
+ no ip address 192.168.10.1/30
+ ip address 192.168.3.1/30
+exit
+!
+router ospf 1
+ no network 192.168.10.0/30 area 0
+ network 192.168.3.0/30 area 0
+exit
+!
+no ip nat source dynamic inside-to-outside pool BR overload interface isp
+no ip nat pool BR
+ip nat pool BR 192.168.3.1-192.168.3.2,192.168.4.1-192.168.4.14
+ip nat source dynamic inside-to-outside pool BR overload interface isp
+!
+! старые пробросы портов (если делали Задание 2 на этом стенде)
+no ip nat source static tcp 192.168.20.2 8080 172.16.2.2 8080
+no ip nat source static tcp 192.168.20.2 2027 172.16.2.2 2027
+!
+end
+write memory
+!
+! Проверка: show ip interface brief | show ip ospf neighbor
