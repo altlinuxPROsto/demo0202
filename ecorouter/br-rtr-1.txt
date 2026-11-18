@@ -4,7 +4,7 @@
 ! Сети как на стенде преподавателя: FW-NET 192.168.3.0/30, BR-NET 192.168.4.0/28
 enable
 configure terminal
-hostname br-rtr
+hostname br-rtr.au-team.irpo
 ip domain-name au-team.irpo
 !
 username net_admin

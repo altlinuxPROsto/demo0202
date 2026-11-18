@@ -4,7 +4,7 @@
 ! Сети как на стенде преподавателя: VLAN100 192.168.0.0/27, VLAN200 192.168.1.0/28, VLAN999 192.168.2.0/29
 enable
 configure terminal
-hostname hq-rtr
+hostname hq-rtr.au-team.irpo
 ip domain-name au-team.irpo
 !
 username net_admin
