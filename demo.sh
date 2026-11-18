@@ -867,6 +867,17 @@ main() {
   log "=== $ROLE : $STEP ==="
   { [ "$STEP" = 1 ] || t2_plan; "$fn"; } 2>&1 | tee -a "/root/demo_${ROLE}.log"
   log "=== готово: $ROLE $STEP  (лог: /root/demo_${ROLE}.log) ==="
+  [ "$STEP" = check ] || clear_history
+}
+
+clear_history() {   # очистка истории команд в конце работы (пароли вводились в консоль)
+  history -c 2>/dev/null
+  local h
+  for h in /root/.bash_history /root/.histfile /root/.local/share/fish/fish_history /home/*/.bash_history; do
+    [ -f "$h" ] && { : > "$h"; }
+  done
+  unset HISTFILE
+  log "история команд очищена"
 }
 
 main "$@"
