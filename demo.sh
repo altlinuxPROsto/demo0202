@@ -573,11 +573,14 @@ br_srv_docker() {
     || warn "8080 не отвечает — посмотри /root/testapp/compose.yaml (ports: \"8080:...\")"
 }
 
-tcp_open() { timeout 1 bash -c "</dev/tcp/$1/$2" 2>/dev/null; }
+tcp_open() { timeout 2 bash -c "</dev/tcp/$1/$2" 2>/dev/null; }
 
-find_cli() {  # адрес HQ-CLI с открытым SSH: сначала из DNS, иначе перебор сети HQ-CLI (кроме шлюза .1)
-  local a b c d n i x cand pfx=${HQ_CLI_NET#*/}
-  tcp_open "$HQ_CLI_IP" 22 && { echo "$HQ_CLI_IP"; return 0; }
+find_cli() {  # адрес HQ-CLI с открытым SSH: инвентарь ansible -> DNS -> перебор сети HQ-CLI (кроме шлюза .1)
+  local a b c d n i x cand pfx=${HQ_CLI_NET#*/} inv
+  inv=$(awk '/^hq-cli /{for(i=1;i<=NF;i++) if($i ~ /^ansible_host=/){sub(/^ansible_host=/,"",$i); print $i; exit}}' /etc/ansible/hosts 2>/dev/null)
+  for cand in $inv "$HQ_CLI_IP"; do
+    tcp_open "$cand" 22 && { echo "$cand"; return 0; }
+  done
   IFS=. read -r a b c d <<<"${HQ_CLI_NET%/*}"; n=$(( (a<<24)|(b<<16)|(c<<8)|d ))
   for (( i=2; i < (1<<(32-pfx)) - 1; i++ )); do
     x=$((n+i)); cand="$((x>>24&255)).$((x>>16&255)).$((x>>8&255)).$((x&255))"
@@ -723,7 +726,10 @@ summary() {
   if [ "$FAILS" = 0 ]; then echo -e "\e[1;32m>>> $(hostname): всё OK\e[0m"
   else echo -e "\e[1;31m>>> $(hostname): ошибок: $FAILS\e[0m"; fi
 }
-ntp_ok() { chronyc -n sources 2>/dev/null | grep -qE "^\^[*+] +$1 "; }
+ntp_ok() {   # сразу опрашиваем сервер (иначе ISP не увидит клиента до следующего планового опроса)
+  chronyc burst 2/4 >/dev/null 2>&1; sleep 5
+  chronyc -n sources 2>/dev/null | grep -qE "^\^[*+] +$1 "
+}
 http_ok() { local c; c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$1"); [ "${c:0:1}" = 2 ] || [ "${c:0:1}" = 3 ]; }
 ssh_banner() { timeout 4 bash -c "exec 3<>/dev/tcp/$1/$2; head -c 8 <&3" 2>/dev/null | grep -q '^SSH-'; }
 
@@ -733,8 +739,12 @@ isp_check() {
   chk "в chrony.conf есть 'local stratum 5'"  "grep -qE '^local stratum 5' /etc/chrony.conf"
   local st; st=$(chronyc tracking 2>/dev/null | awk -F: '/^Stratum/{gsub(/ /,"",$2); print $2}')
   if [ "$st" = 5 ]; then ok "текущий stratum = 5"; else bad "текущий stratum = ${st:-?} (нужно 5; перезапусти 'isp ntp')"; fi
-  chk "NTP-клиенты офиса HQ (через NAT $HQ_RTR_WAN)" "chronyc -n clients | grep -q '^$HQ_RTR_WAN '"
-  chk "NTP-клиенты офиса BR (через NAT $BR_RTR_WAN)" "chronyc -n clients | grep -q '^$BR_RTR_WAN '"
+  local w o
+  for w in "HQ:$HQ_RTR_WAN" "BR:$BR_RTR_WAN"; do
+    o=${w%%:*}; w=${w#*:}
+    if chronyc -n clients 2>/dev/null | grep -q "^$w "; then ok "NTP-клиенты офиса $o (через NAT $w)"
+    else bad "NTP-клиенты офиса $o (через NAT $w) ещё не обращались — запусти 'br-srv checkall' (опросит ISP с клиентов) и повтори 'isp check'"; fi
+  done
   hdr "п.8 Пробросы портов (проверка снаружи)"
   chk "HQ-RTR $HQ_RTR_WAN:8080 -> веб HQ-SRV"     "http_ok http://$HQ_RTR_WAN:8080/"
   chk "BR-RTR $BR_RTR_WAN:8080 -> testapp BR-SRV" "http_ok http://$BR_RTR_WAN:8080/"
