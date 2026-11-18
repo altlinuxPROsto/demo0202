@@ -51,7 +51,16 @@ nth_if()      { phys_ifaces | sed -n "${1}p"; }
 APT_DONE=
 pkg() {
   [ -n "$APT_DONE" ] || { apt-get update </dev/null && APT_DONE=1; }
-  apt-get install -y "$@" </dev/null
+  local out rc extra
+  out=$(apt-get install -y "$@" </dev/null 2>&1); rc=$?; echo "$out" | tail -n 15
+  if [ $rc -ne 0 ] && grep -q 'conflicts with file from package' <<<"$out"; then
+    # пример: alterator-datetime-functions конфликтует со старым alterator-datetime -> обновляем оба
+    extra=$(grep -oE 'from package [^ ]+' <<<"$out" | awk '{print $3}' \
+            | sed -E 's/\.(x86_64|noarch|i586|aarch64)$//; s/-[^-]+-[^-]+$//' | sort -u | xargs)
+    warn "конфликт файлов — обновляю заодно: $extra"
+    apt-get install -y "$@" $extra </dev/null 2>&1 | tail -n 15; rc=${PIPESTATUS[0]}
+  fi
+  return $rc
 }
 pkg_any() { for p in "$@"; do pkg "$p" && return 0; done; warn "не удалось поставить: $*"; return 1; }
 
@@ -120,6 +129,7 @@ sudo_enable() {
   control sudo public 2>/dev/null
   grep -qE '^[@#]includedir\s+/etc/sudoers.d' /etc/sudoers || echo '@includedir /etc/sudoers.d' >> /etc/sudoers
   mkdir -p /etc/sudoers.d
+  chmod 400 /etc/sudoers.d/* 2>/dev/null   # ALT требует 0400 (старые запуски ставили 0440)
 }
 
 ensure_sshuser() {
@@ -135,7 +145,7 @@ mk_sshuser() {
   ensure_sshuser
   usermod -aG wheel sshuser 2>/dev/null
   sudo_enable
-  echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 440 /etc/sudoers.d/sshuser
+  echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 400 /etc/sudoers.d/sshuser
   log "sshuser (uid $(id -u sshuser)) создан, sudo без пароля"
 }
 
@@ -608,7 +618,7 @@ hq_cli_ntp() { chrony_client "$ISP_HQ"; }
 hq_cli_ssh() {   # чтобы ansible с BR-SRV мог зайти на HQ-CLI
   pkg_any openssh-server
   ensure_sshuser; sudo_enable
-  echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 440 /etc/sudoers.d/sshuser
+  echo 'sshuser ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/sshuser; chmod 400 /etc/sudoers.d/sshuser
   systemctl enable --now sshd
 }
 
@@ -635,8 +645,9 @@ hq_cli_sudo() {
   local c g i
   c=$(command -v cat); g=$(command -v grep); i=$(command -v id)
   echo "%hq ALL=(ALL) NOPASSWD: $c, $g, $i" > /etc/sudoers.d/hq
-  chmod 440 /etc/sudoers.d/hq
-  visudo -c >/dev/null && log "sudo для группы hq: только cat, grep, id"
+  chmod 400 /etc/sudoers.d/hq
+  if visudo -c >/dev/null 2>&1; then log "sudo для группы hq: только cat, grep, id"
+  else visudo -c 2>&1 | grep -v 'unused User_Alias'; fi
 }
 
 hq_cli_nfs() {
