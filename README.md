@@ -116,6 +116,20 @@ nmcli con down "$(nmcli -g GENERAL.CONNECTION dev show ens18)"; nmcli con up "$(
 Пароль администратора Samba DC, если он не `P@ssw0rd`, передаётся так:
 `ADMIN_PASS='...' bash <(curl ...) hq-cli 2`.
 
+## Быстрая проверка Задания 2
+
+Две команды проверяют все 9 пунктов и ничего не меняют. По каждому пункту выводится `[OK]` или `[FAIL]`, в конце итог.
+
+На BR-SRV проверяется сам BR-SRV, а также HQ-SRV и HQ-CLI: на них скрипт заходит по SSH как `sshuser`.
+```bash
+bash <(curl -fsSL "https://raw.githubusercontent.com/altlinuxPROsto/demo0202/main/demo.sh?v=7") br-srv checkall
+```
+На ISP проверяются NTP-сервер (stratum 5, клиенты) и пробросы портов 8080/2027 на обоих роутерах:
+```bash
+bash <(curl -fsSL "https://raw.githubusercontent.com/altlinuxPROsto/demo0202/main/demo.sh?v=7") isp check
+```
+Можно проверить и одну машину: `hq-srv check`, `hq-cli check`, `br-srv check`.
+
 ## Отчёт
 
 После каждого шага в `/root/report_<роль>_task<N>.txt` сохраняются выводы команд

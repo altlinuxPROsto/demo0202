@@ -398,7 +398,8 @@ isp_ntp() {
   pkg chrony
   [ -f /etc/chrony.conf.orig ] || cp /etc/chrony.conf /etc/chrony.conf.orig 2>/dev/null
   cat > /etc/chrony.conf <<EOF
-pool $NTP_UPSTREAM iburst
+# minstratum 4 -> собственный stratum ISP ровно 5 даже при синхронизации с интернетом
+pool $NTP_UPSTREAM iburst minstratum 4
 local stratum 5
 allow 172.16.0.0/12
 allow 192.168.0.0/16
@@ -710,6 +711,126 @@ hq_cli_yandex() {
 br_fw_2() { log "Для BR-FW в Задании 2 ничего настраивать не нужно"; }
 
 # =====================================================================
+#  ПРОВЕРКА ЗАДАНИЯ 2 (ничего не меняет)
+# =====================================================================
+FAILS=0
+ok()  { echo -e "  \e[1;32m[OK]\e[0m   $*"; }
+bad() { echo -e "  \e[1;31m[FAIL]\e[0m $*"; FAILS=$((FAILS+1)); }
+chk() { local d=$1; shift; if ( eval "$@" ) >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
+hdr() { echo; echo -e "\e[1;36m== $* ==\e[0m"; }
+summary() {
+  echo
+  if [ "$FAILS" = 0 ]; then echo -e "\e[1;32m>>> $(hostname): всё OK\e[0m"
+  else echo -e "\e[1;31m>>> $(hostname): ошибок: $FAILS\e[0m"; fi
+}
+ntp_ok() { chronyc -n sources 2>/dev/null | grep -qE "^\^[*+] +$1 "; }
+http_ok() { local c; c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$1"); [ "${c:0:1}" = 2 ] || [ "${c:0:1}" = 3 ]; }
+ssh_banner() { timeout 4 bash -c "exec 3<>/dev/tcp/$1/$2; head -c 8 <&3" 2>/dev/null | grep -q '^SSH-'; }
+
+isp_check() {
+  hdr "п.4 NTP-сервер (chrony) на ISP"
+  chk "chronyd запущен"                       "systemctl is-active -q chronyd"
+  chk "в chrony.conf есть 'local stratum 5'"  "grep -qE '^local stratum 5' /etc/chrony.conf"
+  local st; st=$(chronyc tracking 2>/dev/null | awk -F: '/^Stratum/{gsub(/ /,"",$2); print $2}')
+  if [ "$st" = 5 ]; then ok "текущий stratum = 5"; else bad "текущий stratum = ${st:-?} (нужно 5; перезапусти 'isp ntp')"; fi
+  chk "NTP-клиенты офиса HQ (через NAT $HQ_RTR_WAN)" "chronyc -n clients | grep -q '^$HQ_RTR_WAN '"
+  chk "NTP-клиенты офиса BR (через NAT $BR_RTR_WAN)" "chronyc -n clients | grep -q '^$BR_RTR_WAN '"
+  hdr "п.8 Пробросы портов (проверка снаружи)"
+  chk "HQ-RTR $HQ_RTR_WAN:8080 -> веб HQ-SRV"     "http_ok http://$HQ_RTR_WAN:8080/"
+  chk "BR-RTR $BR_RTR_WAN:8080 -> testapp BR-SRV" "http_ok http://$BR_RTR_WAN:8080/"
+  chk "HQ-RTR $HQ_RTR_WAN:2027 -> SSH HQ-SRV"     "ssh_banner $HQ_RTR_WAN 2027"
+  chk "BR-RTR $BR_RTR_WAN:2027 -> SSH BR-SRV"     "ssh_banner $BR_RTR_WAN 2027"
+  summary
+}
+
+hq_srv_check() {
+  hdr "п.2 RAID0 на HQ-SRV"
+  chk "md0 активен, уровень raid0"            "grep -qE '^md0 : active raid0' /proc/mdstat"
+  chk "в массиве 2 диска"                     "mdadm --detail /dev/md0 | grep -qE 'Raid Devices : 2'"
+  chk "/etc/mdadm.conf содержит md0"          "grep -q '^ARRAY /dev/md0' /etc/mdadm.conf"
+  chk "/raid смонтирован, ext4"               "findmnt -n -o FSTYPE /raid | grep -qx ext4"
+  chk "/raid в /etc/fstab (автомонтирование)" "grep -qE '[[:space:]]/raid[[:space:]]' /etc/fstab"
+  hdr "п.3 NFS-сервер"
+  chk "служба NFS запущена"                   "systemctl is-active -q nfs-server || systemctl is-active -q nfs"
+  chk "/raid/nfs экспортирован"               "exportfs | grep -q '^/raid/nfs'"
+  chk "доступ rw только для $HQ_CLI_NET"      "grep -qE '^/raid/nfs[[:space:]]+${HQ_CLI_NET}\(.*rw' /etc/exports"
+  hdr "п.4 NTP-клиент"
+  chk "синхронизация с ISP ($ISP_HQ)"         "ntp_ok $ISP_HQ"
+  hdr "п.7 Веб-приложение (apache + mariadb)"
+  chk "apache запущен"                        "systemctl is-active -q httpd2 || systemctl is-active -q apache2"
+  chk "mariadb запущена"                      "systemctl is-active -q mariadb || systemctl is-active -q mysqld"
+  chk "в БД webdb есть таблицы (dump.sql)"    "[ \"\$(mysql -u root -N -e \"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='webdb'\")\" -gt 0 ]"
+  chk "пользователь web/$PASS входит в webdb" "mysql -u web -p'$PASS' -e 'SELECT 1' webdb"
+  chk "index.php и logo.png в /var/www/html"  "[ -f /var/www/html/index.php ] && [ -f /var/www/html/logo.png ]"
+  chk "сайт отвечает (HTTP 2xx)"              "http_ok http://localhost/"
+  chk "на странице нет ошибок подключения к БД" "! curl -s -m 5 http://localhost/ | grep -qiE 'connection failed|access denied|fatal error|error connecting'"
+  hdr "DNS для домена"
+  chk "SRV-записи домена резолвятся"          "host -W 2 -t SRV _ldap._tcp.$DOMAIN 127.0.0.1"
+  summary
+}
+
+hq_cli_check() {
+  hdr "п.1 Домен на HQ-CLI"
+  chk "HQ-CLI в домене $REALM"                "system-auth status | grep -qi '^ad'"
+  chk "sssd запущен"                          "systemctl is-active -q sssd"
+  local i; for i in 1 2 3 4 5; do chk "hquser$i виден и состоит в группе hq" "id hquser$i | grep -q '(hq)'"; done
+  local sl; sl=$(sudo -l -U hquser1 2>/dev/null)
+  if grep -q '/cat' <<<"$sl" && grep -q '/grep' <<<"$sl" && grep -q '/id' <<<"$sl"; then ok "группа hq: sudo на cat, grep, id"; else bad "группа hq: нет sudo на cat/grep/id"; fi
+  if grep -qE 'NOPASSWD: ALL|\) ALL$' <<<"$sl"; then bad "у группы hq есть sudo на ВСЁ (так нельзя)"; else ok "других команд через sudo у hq нет"; fi
+  chk "sudoers без ошибок"                    "visudo -c"
+  hdr "п.3 NFS-клиент"
+  chk "/mnt/nfs смонтирован с HQ-SRV"         "findmnt -n -t nfs,nfs4 /mnt/nfs"
+  chk "/mnt/nfs в /etc/fstab"                 "grep -qE '[[:space:]]/mnt/nfs[[:space:]]' /etc/fstab"
+  chk "в /mnt/nfs можно писать"               "touch /mnt/nfs/.demo_check && rm -f /mnt/nfs/.demo_check"
+  hdr "п.4 NTP-клиент"
+  chk "синхронизация с ISP ($ISP_HQ)"         "ntp_ok $ISP_HQ"
+  hdr "п.9 Яндекс Браузер"
+  chk "Яндекс Браузер установлен"             "rpm -qa | grep -qi yandex-browser"
+  hdr "для ansible"
+  chk "sshd запущен"                          "systemctl is-active -q sshd"
+  summary
+}
+
+br_srv_check() {
+  hdr "п.1 Samba DC на BR-SRV"
+  local i ul; ul=$(samba-tool user list 2>/dev/null)
+  for i in 1 2 3 4 5; do chk "пользователь hquser$i есть" "grep -qx hquser$i <<<\"\$ul\""; done
+  chk "все 5 пользователей в группе hq"       "[ \"\$(samba-tool group listmembers hq | grep -c '^hquser[1-5]\$')\" = 5 ]"
+  local ps; ps=$(samba-tool domain passwordsettings show 2>/dev/null)
+  chk "минимальная длина пароля 8"            "grep -qE 'Minimum password length: *8\$' <<<\"\$ps\""
+  chk "блокировка после 5 неудачных попыток"  "grep -qE 'lockout threshold.*: *5\$' <<<\"\$ps\""
+  hdr "п.4 NTP-клиент"
+  chk "синхронизация с ISP ($ISP_BR)"         "ntp_ok $ISP_BR"
+  hdr "п.5 Ansible"
+  chk "инвентарь /etc/ansible/hosts: hq-srv, hq-cli, hq-rtr, br-rtr" \
+      "for h in hq-srv hq-cli hq-rtr br-rtr; do grep -q \"^\$h \" /etc/ansible/hosts || exit 1; done"
+  local ap; ap=$(cd /etc/ansible && timeout 120 ansible all -m ping 2>&1)
+  local np; np=$(grep -c '"ping": "pong"' <<<"$ap")
+  if [ "$np" = 4 ]; then ok "ansible ping: pong от всех 4 машин"; else bad "ansible ping: pong только от $np из 4"; fi
+  if grep -qiE '\[WARNING\]|\[DEPRECATION' <<<"$ap"; then bad "ansible выдаёт предупреждения"; else ok "ansible без предупреждений"; fi
+  hdr "п.6 Docker testapp"
+  chk "docker запущен"                        "systemctl is-active -q docker"
+  chk "запущено ≥2 контейнеров (приложение + БД)" "[ \"\$(docker ps -q | wc -l)\" -ge 2 ]"
+  chk "testapp отвечает на порту 8080"        "http_ok http://localhost:8080/"
+  summary
+}
+
+# с BR-SRV: свои проверки + HQ-SRV и HQ-CLI по SSH (как ansible)
+br_srv_checkall() {
+  br_srv_check
+  local f=/root/demo.sh cli
+  curl -fsSL "$RAW/demo.sh?nc=$(date +%s)" -o $f || { warn "не скачал demo.sh — проверь HQ-SRV/HQ-CLI отдельно"; return; }
+  command -v sshpass >/dev/null || pkg sshpass
+  local o=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
+  echo; echo -e "\e[1;35m######## HQ-SRV ($HQ_SRV_IP) ########\e[0m"
+  sshpass -p "$PASS" ssh "${o[@]}" -p 2027 "sshuser@$HQ_SRV_IP" "sudo bash -s -- hq-srv check" < $f || warn "не зашёл на HQ-SRV по SSH"
+  cli=$(find_cli) || cli=$HQ_CLI_IP
+  echo; echo -e "\e[1;35m######## HQ-CLI ($cli) ########\e[0m"
+  sshpass -p "$PASS" ssh "${o[@]}" -p 22 "sshuser@$cli" "sudo bash -s -- hq-cli check" < $f || warn "не зашёл на HQ-CLI по SSH"
+  echo; echo "Осталось проверить на ISP:  ... demo.sh) isp check"
+}
+
+# =====================================================================
 show_router() {
   local f="ecorouter/$1-$2.txt" here; here=$(dirname "$(readlink -f "$0" 2>/dev/null)")
   if [ -f "$here/$f" ]; then cat "$here/$f"; else curl -fsSL "$RAW/$f" || die "нет файла $f"; fi
@@ -723,6 +844,8 @@ cat <<EOF
   hq-srv 1 | 2 | raid | nfs | ntp | web | dnsad
   br-srv 1 | 2 | ntp | samba | docker | ansible
   hq-cli 1 | 2 | ntp | ssh | domain | sudo | nfs | yandex
+  проверка Задания 2:  br-srv checkall (BR-SRV + HQ-SRV + HQ-CLI)   isp check
+                       или на каждой машине: hq-srv check | hq-cli check | br-srv check
   hq-rtr 1 | 2      (EcoRouter — печатает команды для ввода)
   br-rtr 1 | 2
 Переменные: VLAN_MODE=host|access  TZONE=$TZONE  ADMIN_PASS=...  WAN_IF/HQ_IF/BR_IF  FW_OUT_IF/FW_IN_IF
