@@ -573,11 +573,16 @@ br_srv_docker() {
     || warn "8080 не отвечает — посмотри /root/testapp/compose.yaml (ports: \"8080:...\")"
 }
 
-tcp_open() { timeout 2 bash -c "</dev/tcp/$1/$2" 2>/dev/null; }
+# открыт ли порт: /dev/tcp, а если не вышло — ssh-keyscan (для SSH-портов)
+tcp_open() {
+  timeout 2 bash -c "</dev/tcp/$1/$2" 2>/dev/null && return 0
+  command -v ssh-keyscan >/dev/null && ssh-keyscan -T 3 -p "$2" "$1" 2>/dev/null | grep -q .
+}
+inv_cli() { awk '/^hq-cli /{for(i=1;i<=NF;i++) if($i ~ /^ansible_host=/){sub(/^ansible_host=/,"",$i); print $i; exit}}' /etc/ansible/hosts 2>/dev/null; }
 
 find_cli() {  # адрес HQ-CLI с открытым SSH: инвентарь ansible -> DNS -> перебор сети HQ-CLI (кроме шлюза .1)
   local a b c d n i x cand pfx=${HQ_CLI_NET#*/} inv
-  inv=$(awk '/^hq-cli /{for(i=1;i<=NF;i++) if($i ~ /^ansible_host=/){sub(/^ansible_host=/,"",$i); print $i; exit}}' /etc/ansible/hosts 2>/dev/null)
+  inv=$(inv_cli)
   for cand in $inv "$HQ_CLI_IP"; do
     tcp_open "$cand" 22 && { echo "$cand"; return 0; }
   done
@@ -834,7 +839,8 @@ br_srv_checkall() {
   local o=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5)
   echo; echo -e "\e[1;35m######## HQ-SRV ($HQ_SRV_IP) ########\e[0m"
   sshpass -p "$PASS" ssh "${o[@]}" -p 2027 "sshuser@$HQ_SRV_IP" "sudo bash -s -- hq-srv check" < $f || warn "не зашёл на HQ-SRV по SSH"
-  cli=$(find_cli) || cli=$HQ_CLI_IP
+  cli=$(inv_cli)                                   # адрес, по которому ansible уже отвечает pong
+  [ -n "$cli" ] || cli=$(find_cli) || cli=$HQ_CLI_IP
   echo; echo -e "\e[1;35m######## HQ-CLI ($cli) ########\e[0m"
   sshpass -p "$PASS" ssh "${o[@]}" -p 22 "sshuser@$cli" "sudo bash -s -- hq-cli check" < $f || warn "не зашёл на HQ-CLI по SSH"
   echo; echo "Осталось проверить на ISP:  ... demo.sh) isp check"
