@@ -90,8 +90,9 @@ nmcli con down "$(nmcli -g GENERAL.CONNECTION dev show ens18)"; nmcli con up "$(
 | 2 | HQ-RTR | [ecorouter/hq-rtr-2.txt](ecorouter/hq-rtr-2.txt) (проброс 8080 и 2027) |
 | 3 | BR-RTR | [ecorouter/br-rtr-2.txt](ecorouter/br-rtr-2.txt) (проброс 8080 и 2027, NTP) |
 | 4 | HQ-SRV | `hq-srv 2` (RAID0 md0 → /raid, NFS, chrony, apache+mariadb, DNS для домена) |
-| 5 | HQ-CLI | `hq-cli 2` (домен, sudo для hq, NFS, chrony, Яндекс Браузер), затем `reboot` |
-| 6 | BR-SRV | `br-srv 2` (пользователи и группа в Samba, docker testapp, ansible) |
+| 5 | BR-SRV | `br-srv samba` (пользователи hquser1–5, группа hq, политика паролей) — **до HQ-CLI** |
+| 6 | HQ-CLI | `hq-cli 2` (домен, sudo для hq, NFS, chrony, Яндекс Браузер), затем `reboot` и `id hquser1` |
+| 7 | BR-SRV | `br-srv 2` (chrony, docker testapp, ansible; Samba повторно не тронет) |
 
 Задание 2 делается на отдельном стенде преподавателя, где сеть уже настроена (bootstrap не нужен).
 Адреса машин скрипт берёт сам: свой с интерфейса, остальные через DNS стенда (`hq-srv.au-team.irpo` и т.д.)

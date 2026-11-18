@@ -623,21 +623,39 @@ hq_cli_ssh() {   # чтобы ansible с BR-SRV мог зайти на HQ-CLI
 }
 
 hq_cli_domain() {
-  if system-auth status 2>/dev/null | grep -qi "^ad"; then log "HQ-CLI уже в домене: $(system-auth status | head -1)"; return; fi
-  pkg task-auth-ad-sssd || pkg_any task-auth-ad-winbind
-  command -v host >/dev/null || pkg_any bind-utils
-  local tmpdns=
-  if ! host -W 2 -t SRV "_ldap._tcp.$DOMAIN" >/dev/null 2>&1; then
-    warn "SRV-записи домена через текущий DNS не видны — выполни 'hq-srv dnsad' на HQ-SRV"
-    if host -W 2 -t SRV "_ldap._tcp.$DOMAIN" "$BR_SRV_IP" >/dev/null 2>&1; then
-      warn "на время ввода в домен использую DNS контроллера $BR_SRV_IP"
-      cp /etc/resolv.conf /etc/resolv.conf.demo-bak
-      printf 'search %s\nnameserver %s\n' "$DOMAIN" "$BR_SRV_IP" > /etc/resolv.conf; tmpdns=1
-    fi
+  # без sssd машина может быть в домене, но не видеть его пользователей — ставим в любом случае
+  rpm -q sssd-ad >/dev/null 2>&1 || pkg task-auth-ad-sssd || pkg_any sssd-ad
+  rpm -q sssd-ad >/dev/null 2>&1 || warn "sssd-ad не установился — пользователи домена не будут видны"
+
+  local need_join=1
+  if system-auth status 2>/dev/null | grep -qi "^ad" && [ -s /etc/sssd/sssd.conf ]; then
+    need_join=; log "HQ-CLI уже в домене: $(system-auth status | head -1)"
   fi
-  system-auth write ad "$REALM" hq-cli "$WORKGROUP" administrator "$ADMIN_PASS" \
-    && log "HQ-CLI введён в домен $REALM (нужна перезагрузка)" || warn "ввод в домен не удался — проверь ADMIN_PASS и DNS"
-  [ -n "$tmpdns" ] && mv -f /etc/resolv.conf.demo-bak /etc/resolv.conf
+
+  if [ -n "$need_join" ]; then
+    command -v host >/dev/null || pkg_any bind-utils
+    local tmpdns=
+    if ! host -W 2 -t SRV "_ldap._tcp.$DOMAIN" >/dev/null 2>&1; then
+      warn "SRV-записи домена через текущий DNS не видны — выполни 'hq-srv dnsad' на HQ-SRV"
+      if host -W 2 -t SRV "_ldap._tcp.$DOMAIN" "$BR_SRV_IP" >/dev/null 2>&1; then
+        warn "на время ввода в домен использую DNS контроллера $BR_SRV_IP"
+        cp /etc/resolv.conf /etc/resolv.conf.demo-bak
+        printf 'search %s\nnameserver %s\n' "$DOMAIN" "$BR_SRV_IP" > /etc/resolv.conf; tmpdns=1
+      fi
+    fi
+    system-auth write ad "$REALM" hq-cli "$WORKGROUP" administrator "$ADMIN_PASS" \
+      && log "HQ-CLI введён в домен $REALM" || warn "ввод в домен не удался — проверь ADMIN_PASS и DNS"
+    [ -n "$tmpdns" ] && mv -f /etc/resolv.conf.demo-bak /etc/resolv.conf
+  fi
+
+  systemctl enable sssd >/dev/null 2>&1; systemctl restart sssd; sss_cache -E 2>/dev/null; sleep 3
+  if id administrator >/dev/null 2>&1; then
+    log "пользователи домена видны: $(id administrator | cut -c1-80)"
+    if id hquser1 >/dev/null 2>&1; then log "$(id hquser1)"
+    else warn "hquser1 в домене нет — выполни 'br-srv samba' на BR-SRV, потом здесь: sss_cache -E; id hquser1"; fi
+  else
+    warn "пользователи домена не видны — пришли вывод: system-auth status; systemctl status sssd --no-pager"
+  fi
 }
 
 hq_cli_sudo() {
