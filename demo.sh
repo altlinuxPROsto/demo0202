@@ -572,7 +572,27 @@ br_srv_docker() {
     || warn "8080 не отвечает — посмотри /root/testapp/compose.yaml (ports: \"8080:...\")"
 }
 
+tcp_open() { timeout 1 bash -c "</dev/tcp/$1/$2" 2>/dev/null; }
+
+find_cli() {  # адрес HQ-CLI с открытым SSH: сначала из DNS, иначе перебор сети HQ-CLI (кроме шлюза .1)
+  local a b c d n i x cand pfx=${HQ_CLI_NET#*/}
+  tcp_open "$HQ_CLI_IP" 22 && { echo "$HQ_CLI_IP"; return 0; }
+  IFS=. read -r a b c d <<<"${HQ_CLI_NET%/*}"; n=$(( (a<<24)|(b<<16)|(c<<8)|d ))
+  for (( i=2; i < (1<<(32-pfx)) - 1; i++ )); do
+    x=$((n+i)); cand="$((x>>24&255)).$((x>>16&255)).$((x>>8&255)).$((x&255))"
+    tcp_open "$cand" 22 && { echo "$cand"; return 0; }
+  done
+  return 1
+}
+
 br_srv_ansible() {
+  local cli
+  if cli=$(find_cli); then
+    [ "$cli" = "$HQ_CLI_IP" ] || warn "в DNS hq-cli = $HQ_CLI_IP, но SSH отвечает на $cli — беру $cli"
+    HQ_CLI_IP=$cli
+  else
+    warn "HQ-CLI с открытым SSH (порт 22) не найден в $HQ_CLI_NET — выполни 'hq-cli ssh' на HQ-CLI"
+  fi
   pkg ansible sshpass
   pkg_any python3-module-ansible-pylibssh python3-module-paramiko >/dev/null 2>&1
   mkdir -p /etc/ansible
