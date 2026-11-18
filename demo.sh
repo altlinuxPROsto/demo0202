@@ -31,6 +31,12 @@ HQ_MGMT_GW=192.168.99.1;                          HQ_MGMT_NET=192.168.99.0/29   
 BR_RTR_FW=192.168.10.1;  BR_FW_OUT=192.168.10.2;  FW_NET=192.168.10.0/30        # BR-RTR <-> BR-FW
 BR_FW_IN=192.168.20.1;   BR_SRV_IP=192.168.20.2;  BR_NET=192.168.20.0/28        # BR-FW  <-> BR-SRV
 TUN_HQ=10.10.10.1; TUN_BR=10.10.10.2                                            # GRE 10.10.10.0/30
+HQ_RTR_IP=$HQ_SRV_GW; BR_RTR_IP=$BR_RTR_FW                                      # адреса роутеров для ansible
+
+# ---------------- Стенд Задания 2 (преднастроен преподавателем) ----------------
+# Адреса определяются автоматически через DNS стенда; это значения на случай, если DNS не ответит.
+T2_DEF_HQ_SRV=192.168.0.2;  T2_DEF_HQ_RTR=192.168.0.1;  T2_DEF_HQ_CLI=192.168.1.4;  T2_CLI_PFX=28
+T2_DEF_BR_SRV=192.168.4.2;  T2_DEF_BR_RTR=192.168.3.1
 
 # =====================================================================
 #  Вспомогательные функции
@@ -165,6 +171,35 @@ mount_iso() {
   fi
   mountpoint -q /mnt/add || die "Additional.iso не найден — подключи его в CD-ROM ВМ"
   log "Additional.iso смонтирован в /mnt/add"
+}
+
+my_ip()  { ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'; }
+dns_a()  {   # имя (без домена) -> IPv4 из DNS (не из /etc/hosts)
+  local ip=
+  command -v host >/dev/null && ip=$(host -W 2 -t A "$1.$DOMAIN" 2>/dev/null | awk '/has address/{print $4; exit}')
+  [ -n "$ip" ] || ip=$(getent ahostsv4 "$1.$DOMAIN" 2>/dev/null | awk '$1 !~ /^127\./{print $1; exit}')
+  echo "$ip"
+}
+ip_net() {   # 192.168.1.4 28 -> 192.168.1.0/28
+  local a b c d n m; IFS=. read -r a b c d <<<"$1"
+  n=$(( (a<<24)|(b<<16)|(c<<8)|d )); m=$(( (0xFFFFFFFF << (32-$2)) & 0xFFFFFFFF )); n=$(( n & m ))
+  echo "$((n>>24&255)).$((n>>16&255)).$((n>>8&255)).$((n&255))/$2"
+}
+t2_addr() {  # имя по умолчанию
+  local me ip; me=$(hostname); me=${me%%.*}
+  if [ "$me" = "$1" ]; then ip=$(my_ip); else ip=$(dns_a "$1"); fi
+  echo "${ip:-$2}"
+}
+t2_plan() {  # адресация преднастроенного стенда Задания 2
+  command -v host >/dev/null || pkg_any bind-utils >/dev/null 2>&1
+  HQ_SRV_IP=${T2_HQ_SRV:-$(t2_addr hq-srv $T2_DEF_HQ_SRV)}
+  BR_SRV_IP=${T2_BR_SRV:-$(t2_addr br-srv $T2_DEF_BR_SRV)}
+  HQ_RTR_IP=${T2_HQ_RTR:-$(t2_addr hq-rtr $T2_DEF_HQ_RTR)}
+  BR_RTR_IP=${T2_BR_RTR:-$(t2_addr br-rtr $T2_DEF_BR_RTR)}
+  HQ_CLI_IP=${T2_HQ_CLI:-$(t2_addr hq-cli $T2_DEF_HQ_CLI)}
+  HQ_CLI_NET=${T2_HQ_CLI_NET:-$(ip_net "$HQ_CLI_IP" $T2_CLI_PFX)}
+  log "адреса стенда: HQ-SRV=$HQ_SRV_IP HQ-CLI=$HQ_CLI_IP (сеть $HQ_CLI_NET) HQ-RTR=$HQ_RTR_IP BR-SRV=$BR_SRV_IP BR-RTR=$BR_RTR_IP"
+  log "если что-то не так — передай T2_HQ_SRV= T2_BR_SRV= T2_HQ_CLI= T2_HQ_CLI_NET= T2_HQ_RTR= T2_BR_RTR="
 }
 
 report() {
@@ -454,11 +489,36 @@ hq_srv_web() {
 }
 
 hq_srv_dnsad() {   # пересылка запросов домена Samba (SRV/Kerberos) на BR-SRV
-  [ -f /etc/dnsmasq.conf ] || { warn "dnsmasq не настроен — пропускаю"; return; }
-  sed -i "\#^server=/$DOMAIN/#d" /etc/dnsmasq.conf
-  echo "server=/$DOMAIN/$BR_SRV_IP" >> /etc/dnsmasq.conf
-  systemctl restart dnsmasq
-  log "dnsmasq: неизвестные имена $DOMAIN (_ldap, _kerberos...) пересылаются на BR-SRV"
+  command -v host >/dev/null || pkg bind-utils
+  if host -W 2 -t SRV "_ldap._tcp.$DOMAIN" 127.0.0.1 >/dev/null 2>&1; then
+    log "DNS уже отдаёт SRV-записи домена — ничего не меняю"; return
+  fi
+  if systemctl is-active -q dnsmasq; then
+    sed -i "\#^server=/$DOMAIN/#d" /etc/dnsmasq.conf
+    echo "server=/$DOMAIN/$BR_SRV_IP" >> /etc/dnsmasq.conf
+    systemctl restart dnsmasq
+    log "dnsmasq: неизвестные имена $DOMAIN (_ldap, _kerberos...) пересылаются на BR-SRV ($BR_SRV_IP)"
+  elif systemctl is-active -q bind || systemctl is-active -q named; then
+    local conf z svc
+    for conf in /etc/bind/local.conf /var/lib/bind/etc/local.conf /etc/named.conf /etc/bind/named.conf.local; do [ -f "$conf" ] && break; done
+    sed -i '/demo0202-ad-begin/,/demo0202-ad-end/d' "$conf"
+    {
+      echo "// demo0202-ad-begin: служебные записи AD -> Samba DC на BR-SRV"
+      for z in _msdcs _tcp _udp _sites; do
+        echo "zone \"$z.$DOMAIN\" { type forward; forward only; forwarders { $BR_SRV_IP; }; };"
+      done
+      echo "// demo0202-ad-end"
+    } >> "$conf"
+    named-checkconf 2>&1 | head -5
+    svc=bind; systemctl is-active -q bind || svc=named
+    systemctl restart $svc
+    log "bind ($conf): зоны _msdcs/_tcp/_udp/_sites.$DOMAIN пересылаются на BR-SRV ($BR_SRV_IP)"
+  else
+    warn "не нашёл на HQ-SRV ни dnsmasq, ни bind — DNS для домена настрой вручную"; return
+  fi
+  sleep 2
+  host -W 3 -t SRV "_ldap._tcp.$DOMAIN" 127.0.0.1 && log "SRV-записи домена резолвятся" \
+    || warn "SRV всё ещё не резолвится (если bind с dnssec-validation — поставь 'dnssec-validation no;' в options.conf)"
 }
 
 br_srv_2() { br_srv_ntp; br_srv_samba; br_srv_docker; br_srv_ansible
@@ -512,8 +572,8 @@ hq-srv ansible_host=$HQ_SRV_IP ansible_port=2027 ansible_user=sshuser ansible_pa
 hq-cli ansible_host=$HQ_CLI_IP ansible_port=22 ansible_user=sshuser ansible_password=$PASS
 
 [routers]
-hq-rtr ansible_host=$HQ_SRV_GW
-br-rtr ansible_host=$BR_RTR_FW
+hq-rtr ansible_host=$HQ_RTR_IP
+br-rtr ansible_host=$BR_RTR_IP
 
 [routers:vars]
 ansible_connection=network_cli
@@ -555,9 +615,19 @@ hq_cli_ssh() {   # чтобы ansible с BR-SRV мог зайти на HQ-CLI
 hq_cli_domain() {
   if system-auth status 2>/dev/null | grep -qi "^ad"; then log "HQ-CLI уже в домене: $(system-auth status | head -1)"; return; fi
   pkg task-auth-ad-sssd || pkg_any task-auth-ad-winbind
-  host -t SRV "_ldap._tcp.${DOMAIN}" >/dev/null 2>&1 || warn "SRV-запись домена не резолвится — сначала выполни 'hq-srv dnsad' на HQ-SRV"
+  command -v host >/dev/null || pkg_any bind-utils
+  local tmpdns=
+  if ! host -W 2 -t SRV "_ldap._tcp.$DOMAIN" >/dev/null 2>&1; then
+    warn "SRV-записи домена через текущий DNS не видны — выполни 'hq-srv dnsad' на HQ-SRV"
+    if host -W 2 -t SRV "_ldap._tcp.$DOMAIN" "$BR_SRV_IP" >/dev/null 2>&1; then
+      warn "на время ввода в домен использую DNS контроллера $BR_SRV_IP"
+      cp /etc/resolv.conf /etc/resolv.conf.demo-bak
+      printf 'search %s\nnameserver %s\n' "$DOMAIN" "$BR_SRV_IP" > /etc/resolv.conf; tmpdns=1
+    fi
+  fi
   system-auth write ad "$REALM" hq-cli "$WORKGROUP" administrator "$ADMIN_PASS" \
     && log "HQ-CLI введён в домен $REALM (нужна перезагрузка)" || warn "ввод в домен не удался — проверь ADMIN_PASS и DNS"
+  [ -n "$tmpdns" ] && mv -f /etc/resolv.conf.demo-bak /etc/resolv.conf
 }
 
 hq_cli_sudo() {
@@ -623,7 +693,7 @@ main() {
   local fn="${ROLE//-/_}_${STEP}"
   declare -F "$fn" >/dev/null || usage
   log "=== $ROLE : $STEP ==="
-  "$fn" 2>&1 | tee -a "/root/demo_${ROLE}.log"
+  { [ "$STEP" = 1 ] || t2_plan; "$fn"; } 2>&1 | tee -a "/root/demo_${ROLE}.log"
   log "=== готово: $ROLE $STEP  (лог: /root/demo_${ROLE}.log) ==="
 }
 
